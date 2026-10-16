@@ -1,6 +1,7 @@
 """/v1/meta and its features, presence + active_count, links/by-urls, errors, unknown routes."""
 
 import re
+import urllib.parse
 import uuid
 
 import pytest
@@ -60,6 +61,9 @@ def test_meta(api):
     assert m["profile"] in ("min", "full")
     assert isinstance(m["impl"], str) and m["impl"]
     assert isinstance(m["impl_version"], str) and SEMVER_RE.match(m["impl_version"]), m["impl_version"]
+    if "impl_url" in m:  # optional; an absolute http(s) URL
+        u = urllib.parse.urlsplit(m["impl_url"]) if isinstance(m["impl_url"], str) else None
+        assert u and u.scheme.lower() in ("http", "https") and u.netloc, m["impl_url"]
     assert isinstance(m["features"], list)
     assert all(isinstance(f, str) and FEATURE_NAME_RE.match(f) for f in m["features"]), m["features"]
     assert len(set(m["features"])) == len(m["features"])

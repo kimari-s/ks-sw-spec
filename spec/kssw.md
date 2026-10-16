@@ -315,6 +315,7 @@ Describes the server. MUST be implemented by every server.
 ```json
 {"protocol": "kssw", "version": "1", "profile": "min",
  "impl": "php", "impl_version": "0.2.0-alpha.1",
+ "impl_url": "https://github.com/kimari-s/ks-sw-api",
  "features": ["active_count", "admin", "presence"]}
 ```
 
@@ -324,6 +325,9 @@ Describes the server. MUST be implemented by every server.
 - `impl`: a short name of the implementation. `impl_version`: its release
   version, SemVer [SemVer] RECOMMENDED. They say nothing about the
   protocol.
+- `impl_url` (OPTIONAL): where the implementation's source is, e.g. its
+  repository; an absolute `http` or `https` URL. A client may link
+  `impl` / `impl_version` to it. Absent when the server does not say.
 - `features`: the features this server implements (§8), no duplicates, in
   any order.
 

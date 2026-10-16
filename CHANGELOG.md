@@ -6,6 +6,8 @@ the protocol is `1`; releases of this repository follow SemVer.
 
 ## Unreleased
 
+- §7.1: `/v1/meta` may carry `impl_url`, where the implementation's
+  source is (an absolute http(s) URL). OPTIONAL; clients may link to it.
 - §5.7: the suggested post rate-limit window is a few seconds (e.g. 5),
   was 30 seconds. Still the operator's choice (SHOULD, non-normative).
 

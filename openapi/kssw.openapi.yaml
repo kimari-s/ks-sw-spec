@@ -658,6 +658,11 @@ components:
         profile: { type: string, enum: [min, full], description: Highest conformance class implemented }
         impl: { type: string, description: "Implementation name, e.g. php" }
         impl_version: { type: string, description: "The implementation's release version (SemVer), e.g. 0.2.0-alpha.1" }
+        impl_url:
+          type: string
+          format: uri
+          pattern: '^[Hh][Tt][Tt][Pp][Ss]?://'
+          description: Optional. Where the implementation's source is (e.g. its repository); an absolute http(s) URL
         features:
           type: array
           uniqueItems: true
@@ -671,6 +676,7 @@ components:
         profile: min
         impl: php
         impl_version: "0.2.0-alpha.1"
+        impl_url: https://github.com/kimari-s/ks-sw-api
         features: [active_count, admin, presence]
 
     Post:
