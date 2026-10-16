@@ -1,0 +1,478 @@
+openapi: 3.0.3
+info:
+  title: kssw admin
+  version: "1"
+  description: |
+    The kssw admin API, version 1 (Draft): moderation and operation of a
+    kssw server, meant to be driven by a CLI or an AI agent. It is the
+    `admin` feature of the kssw protocol; the client API is
+    `kssw.openapi.yaml` and the normative text is
+    [`spec/kssw.md`](../spec/kssw.md) (§9). Paths are relative to the API
+    base, like the client API.
+
+    **Discovery.** A server that offers this API lists the feature `admin`
+    in `GET /v1/meta` (`kssw.openapi.yaml`). Without it, every path here may
+    answer `404`. `GET /v1/admin/capabilities` then says which operations
+    and admin features this server implements.
+
+    **Features.** Operations with `x-feature: <name>` are optional; a
+    server lists the ones it implements in `capabilities.features` and a
+    client calls them only then. The rest are required. Feature names:
+    - `maintenance`: `GET` / `PUT /v1/admin/maintenance`
+    - `backup`: `GET /v1/admin/backup`
+
+    Planned for full servers (not specified yet; each will be an
+    `x-feature`): account suspension, federation blocks, IP / client
+    bans, word filters.
+
+    **Auth.** `Authorization: Bearer <token>`. The token is a high-entropy
+    secret made by the operator (for example 32 random bytes, base64url);
+    a server stores only a hash of it (e.g. SHA-256) and compares in
+    constant time. Missing or wrong token: `401` `unauthorized`. Over plain http
+    (other than from the server's own machine) a server answers `403`
+    `https_required`. Repeated failures from one client: `429`
+    `rate_limited` with `Retry-After`, even for the right token.
+
+    **Errors.** JSON `{"detail": "<English message>", "code": "<code>"}`.
+    `code` is stable and machine-readable; `detail` is for people. Codes:
+    `bad_request` (400), `unauthorized` (401), `https_required` (403),
+    `not_found` (404: unknown path, or the API is off), `post_not_found`
+    (404), `method_not_allowed` (405), `conflict` / `database_missing`
+    / `maintenance_unavailable` (409), `too_large` (413), `invalid` (422),
+    `rate_limited` (429), `internal` / `config_invalid` (500),
+    `database_missing` / `unavailable` (503). A client treats unknown codes
+    by their status.
+
+    **Mutations** are idempotent (doing it again changes nothing and
+    succeeds) and take `dry_run` (in the JSON body or as a query
+    parameter; either `true` wins): the response then says what would
+    change, and nothing changes. Every mutation, dry or not, is written to
+    the admin log.
+
+    **Maintenance.** The admin API keeps working while the board is in
+    maintenance mode (public writes answer `503`).
+
+    Conventions as in `kssw.openapi.yaml`: lowercase UUIDv4 ids; ISO 8601 times
+    with the server's offset and microseconds; repeated query names for
+    lists; booleans `true` / `false`. Lists are paged:
+    `{"items", "page", "page_size", "total", "has_more"}`, `page` from 1.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: /
+security:
+  - bearer: []
+paths:
+  /v1/admin/capabilities:
+    get:
+      operationId: getCapabilities
+      summary: What this server's admin API implements
+      responses:
+        "200":
+          description: Capabilities
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Capabilities" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HttpsRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/admin/posts:
+    get:
+      operationId: listPosts
+      summary: List posts, deleted ones included, newest first
+      description: |
+        Every filter narrows the result (AND). Unlike the board API,
+        deleted posts keep their text, tags and author here.
+      parameters:
+        - name: q
+          in: query
+          description: Text contains every whitespace-separated term (substring; case-insensitive at least for ASCII). At most 5 terms.
+          schema: { type: string }
+        - name: author
+          in: query
+          description: Author is exactly this.
+          schema: { type: string }
+        - name: tags
+          in: query
+          description: Carries any of these tags.
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, deleted, all], default: all }
+        - name: root_id
+          in: query
+          description: Only posts of this thread.
+          schema: { type: string, format: uuid }
+        - name: since
+          in: query
+          description: Created at or after (ISO 8601 date or date-time; without an offset, the server's timezone).
+          schema: { type: string }
+        - name: until
+          in: query
+          description: Created before.
+          schema: { type: string }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of posts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Paged"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminPost" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/admin/posts/{id}:
+    get:
+      operationId: getPost
+      summary: One post, deleted or not
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The post
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminPost" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: "`post_not_found`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/admin/posts/delete:
+    post:
+      operationId: deletePosts
+      summary: Delete posts (the same soft delete as a poster's own)
+      description: |
+        A deleted post stays in its thread with `status: "deleted"`; the
+        board API hides its text, tags and author. Per-id results; the
+        request succeeds even when some ids are unknown.
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IdsRequest" }
+      responses:
+        "200":
+          description: What changed (or would change)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusChange" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/admin/posts/restore:
+    post:
+      operationId: restorePosts
+      summary: Undo deletes (also of posts their poster deleted)
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IdsRequest" }
+      responses:
+        "200":
+          description: What changed (or would change)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusChange" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/admin/maintenance:
+    get:
+      operationId: getMaintenance
+      x-feature: maintenance
+      summary: Whether maintenance mode is on
+      responses:
+        "200":
+          description: State
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Maintenance" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: setMaintenance
+      x-feature: maintenance
+      summary: Turn maintenance mode on or off
+      description: |
+        While on, the board API answers every write with `503`
+        `{"detail": "maintenance"}`; reads and this API keep working. A
+        server may refuse to turn it off while its data is not in place
+        (`409` `database_missing`).
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [maintenance]
+              properties:
+                maintenance: { type: boolean }
+                dry_run: { type: boolean, default: false }
+      responses:
+        "200":
+          description: The new (or would-be) state
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Maintenance"
+                  - type: object
+                    required: [dry_run, changed]
+                    properties:
+                      dry_run: { type: boolean }
+                      changed: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/admin/backup:
+    get:
+      operationId: getBackup
+      x-feature: backup
+      summary: Download a consistent snapshot of the server's data
+      description: |
+        The format is the implementation's, named by `X-Backup-Format`
+        (e.g. `sqlite3` for a complete SQLite database). Works during
+        maintenance. Logged as `backup`.
+      responses:
+        "200":
+          description: The snapshot
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: '`attachment; filename="..."`'
+            X-Backup-Format:
+              schema: { type: string }
+            X-Content-SHA256:
+              schema: { type: string }
+              description: Hex SHA-256 of the body, for the client to verify.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/log:
+    get:
+      operationId: listLog
+      summary: The admin log, newest first
+      parameters:
+        - name: action
+          in: query
+          description: Only entries of this action.
+          schema: { type: string }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of log entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Paged"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/LogEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      description: At most `capabilities.limits.page_size_max` (at least 50).
+      schema: { type: integer, minimum: 1, default: 50 }
+    DryRun:
+      name: dry_run
+      in: query
+      description: "Report what would change; change nothing. Same as `\"dry_run\": true` in the body."
+      schema: { type: boolean, default: false }
+
+  responses:
+    Unauthorized:
+      description: "`unauthorized`: missing or wrong bearer token"
+      headers:
+        WWW-Authenticate: { schema: { type: string } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    HttpsRequired:
+      description: "`https_required`: plain http from another machine"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: "`rate_limited`: too many failed authentications from this client"
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Invalid:
+      description: "`invalid`: malformed request"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: The server's state does not allow it now
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [detail, code]
+      properties:
+        detail: { type: string }
+        code: { type: string }
+
+    Capabilities:
+      type: object
+      required: [version, impl, impl_version, features, operations, limits]
+      properties:
+        version: { type: string, description: 'Admin API major version: "1" for this document' }
+        impl: { type: string, description: As `impl` in `/v1/meta` }
+        impl_version: { type: string, description: "The implementation's release version, as `impl_version` in `/v1/meta`" }
+        features:
+          type: array
+          items: { type: string }
+          description: Optional operations (`x-feature`) implemented. Unknown names are ignored.
+        operations:
+          type: array
+          items: { type: string }
+          description: operationIds implemented (required ones plus listed features).
+        post_filters:
+          type: array
+          items: { type: string }
+          description: Query parameters `listPosts` understands.
+        limits:
+          type: object
+          required: [page_size_max, ids_max]
+          properties:
+            page_size_max: { type: integer }
+            ids_max: { type: integer, description: Most ids per delete / restore request }
+        timezone: { type: string, description: "IANA zone for times without an offset, e.g. Asia/Tokyo" }
+        server_time: { type: string, format: date-time }
+      example:
+        version: "1"
+        impl: php
+        impl_version: "0.2.0-alpha.1"
+        features: [backup, maintenance]
+        operations: [getCapabilities, listPosts, getPost, deletePosts, restorePosts, getMaintenance, setMaintenance, getBackup, listLog]
+        post_filters: [q, author, tags, status, root_id, since, until]
+        limits: { page_size_max: 200, ids_max: 100 }
+        timezone: Asia/Tokyo
+        server_time: "2026-10-16T12:00:00.000000+09:00"
+
+    Paged:
+      type: object
+      required: [items, page, page_size, total, has_more]
+      properties:
+        items: { type: array, items: {} }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+        has_more: { type: boolean }
+
+    AdminPost:
+      type: object
+      required: [id, created_at, status, author, tags, text, parent_id, root_id]
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, deleted] }
+        author: { type: string, nullable: true }
+        tags: { type: array, items: { type: string } }
+        text: { type: string, description: "As stored, also for deleted posts" }
+        parent_id: { type: string, format: uuid, nullable: true }
+        root_id: { type: string, format: uuid }
+
+    IdsRequest:
+      type: object
+      required: [ids]
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: Post ids; at most `limits.ids_max`. Duplicates are dropped; malformed ids get `invalid_id`.
+        dry_run: { type: boolean, default: false }
+
+    StatusChange:
+      type: object
+      required: [dry_run, changed, results]
+      properties:
+        dry_run: { type: boolean }
+        changed: { type: integer, description: How many posts changed (or would) }
+        results:
+          type: array
+          items:
+            type: object
+            required: [id, result, status_before, status_after]
+            properties:
+              id: { type: string }
+              result: { type: string, enum: [changed, unchanged, not_found, invalid_id] }
+              status_before: { type: string, enum: [active, deleted], nullable: true }
+              status_after: { type: string, enum: [active, deleted], nullable: true, description: "After the change (dry run: as it would be)" }
+
+    Maintenance:
+      type: object
+      required: [maintenance, since]
+      properties:
+        maintenance: { type: boolean }
+        since: { type: string, format: date-time, nullable: true }
+        database:
+          type: string
+          enum: [present, missing]
+          description: Optional. `missing` while the server's data is away (e.g. a database file being edited by hand).
+
+    LogEntry:
+      type: object
+      required: [id, created_at, action, target, dry_run, result]
+      properties:
+        id: { type: integer, description: Increases with time }
+        created_at: { type: string, format: date-time }
+        action:
+          type: string
+          description: "delete, restore, maintenance_on, maintenance_off, backup; implementations may add more (e.g. login, logout)"
+        target: { type: string, nullable: true, description: "The post id, when there is one" }
+        dry_run: { type: boolean }
+        result: { type: string, nullable: true, description: "changed, unchanged, not_found, invalid_id, ok" }
+        via: { type: string, nullable: true, description: "Where it came from, e.g. api; implementations may add their own (e.g. html)" }

@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local
+.scratch/
+make.local

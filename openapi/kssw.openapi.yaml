@@ -1,0 +1,748 @@
+openapi: 3.0.3
+info:
+  title: kssw
+  version: "1"
+  description: |
+    The kssw client API, protocol version 1 (Draft): the HTTP API between a
+    board UI (a kuzuha-style BBS front end) and its server.
+
+    This file describes the shapes; the normative text is
+    [`spec/kssw.md`](../spec/kssw.md). Where they disagree, the prose wins.
+    The admin API is a separate document (`kssw-admin.openapi.yaml`).
+
+    Every path below is relative to the server's **API base** (for example
+    `https://example.com/bbs/api`), except `/.well-known/kssw`, which is at
+    the root of the host.
+
+    **Conformance classes.** Every operation carries `x-tier`. A `min`
+    server implements every `min` operation; a `full` server implements
+    every `min` and every `full` operation (min ⊂ full).
+
+    **Features.** Operations with `x-feature: <name>` are optional
+    extensions. A server lists the features it implements in
+    `GET /v1/meta` `features`; a client calls such an operation only when
+    its feature is listed. Operations without `x-feature` are required for
+    their tier. The registry of feature names is in the prose (§8).
+
+    **Conventions** (details in the prose, §5).
+    - Ids are lowercase UUIDv4 strings.
+    - Times are RFC 3339 date-times with an explicit offset and microseconds,
+      fixed width, e.g. `2026-10-16T12:34:56.123456+09:00`.
+    - List query parameters repeat the name: `?tags=a&tags=b`.
+    - Booleans in queries: `true` / `false` (servers also accept `1`/`0`,
+      `yes`/`no`, `on`/`off`).
+    - Errors are JSON `{"detail": "<English message>", "code": "<code>"}`.
+      `422` (`invalid`): a malformed request (bad type, out of range, too
+      long). `400` (`bad_request`): a well-formed request the server will not
+      run (missing filter, too many ids).
+    - No cookies, no login. A browser identifies itself only with its own
+      random `client_id` (in the post body when writing, in the
+      `X-Client-Id` header when asking "is this mine?" or deleting). Servers
+      never return client ids.
+    - Deleted posts stay in lists with `status: "deleted"`, empty `text`, no
+      tags and no author.
+    - Maintenance: a server may refuse every write with `503`
+      `{"detail": "maintenance", "code": "maintenance"}`; reads keep working.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: /
+    description: The API base (any URL; paths below are appended to it)
+paths:
+  /.well-known/kssw:
+    get:
+      operationId: getDiscovery
+      x-tier: min
+      summary: Discovery document (at the host root, not under the API base)
+      description: |
+        Served at `https://<host>/.well-known/kssw`, outside the API base.
+        Recommended (SHOULD) for operators, not required: a server on a
+        shared host may be unable to place it. See the prose, §6.
+      servers:
+        - url: /
+          description: The host root
+      responses:
+        "200":
+          description: Where the kssw APIs on this host live
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Discovery" }
+        "404":
+          description: No kssw API is advertised on this host
+
+  /v1/meta:
+    get:
+      operationId: getMeta
+      x-tier: min
+      summary: Protocol, version, conformance class, implementation and features
+      responses:
+        "200":
+          description: Server description
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+
+  /v1/posts:
+    get:
+      operationId: listPosts
+      x-tier: min
+      summary: List posts
+      description: |
+        Order:
+        - default: newest first (`created_at` desc, then `id` desc);
+        - `root_id` / `root_ids`: thread order, oldest first;
+        - `roots_only`: root posts, ordered by the newest post in their tree
+          (a thread with a new reply comes back to the top).
+
+        Filters:
+        - `root_id` / `root_ids`: only these trees. `tags`, `author` and
+          `roots_only` are ignored; `exclude_tags` still applies.
+        - `include_tree` with `tags` and/or `author`: every post of each tree
+          that contains a matching, non-excluded post, minus excluded posts.
+          `roots_only` is ignored in this mode.
+        - otherwise `tags` / `author` / `roots_only` filter posts directly.
+        - `exclude_tags` always drops posts carrying them.
+
+        Deleted posts are included.
+      parameters:
+        - $ref: "#/components/parameters/Tags"
+        - $ref: "#/components/parameters/TagsOp"
+        - $ref: "#/components/parameters/ExcludeTags"
+        - $ref: "#/components/parameters/ExcludeOp"
+        - $ref: "#/components/parameters/Author"
+        - $ref: "#/components/parameters/Page"
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 10000, default: 20 }
+        - name: root_id
+          in: query
+          schema: { type: string }
+        - name: root_ids
+          in: query
+          description: At most 50. Cannot be combined with `root_id` or `roots_only` (400).
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+        - $ref: "#/components/parameters/RootsOnly"
+        - $ref: "#/components/parameters/IncludeTree"
+        - $ref: "#/components/parameters/XClientId"
+      responses:
+        "200":
+          description: Posts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Post" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/Invalid" }
+    post:
+      operationId: createPost
+      x-tier: min
+      summary: Create a post
+      description: |
+        Stored as sent: no tag extraction from the text, the author is not
+        added as a tag. `root_id` is the parent's root, or the new post's own
+        id for a new thread.
+
+        Rate limit (SHOULD): a server limits how often one client posts, per
+        `client_id` and, independently, per client address. Over the limit
+        it answers `429` (`rate_limited`) with a `Retry-After` header.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostCreate"
+      responses:
+        "200":
+          description: The created post. `mine` is true when `client_id` was sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Post"
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422": { $ref: "#/components/responses/Invalid" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+
+  /v1/posts/count:
+    get:
+      operationId: countPosts
+      x-tier: min
+      summary: Number of posts `GET /v1/posts` would return across all pages
+      parameters:
+        - $ref: "#/components/parameters/Tags"
+        - $ref: "#/components/parameters/TagsOp"
+        - $ref: "#/components/parameters/ExcludeTags"
+        - $ref: "#/components/parameters/ExcludeOp"
+        - $ref: "#/components/parameters/Author"
+        - name: root_id
+          in: query
+          schema: { type: string }
+        - $ref: "#/components/parameters/RootsOnly"
+        - $ref: "#/components/parameters/IncludeTree"
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema: { type: integer }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/posts/latest_id:
+    get:
+      operationId: getLatestPostId
+      x-tier: min
+      summary: Id of the newest post (deleted posts count), for cheap reload checks
+      responses:
+        "200":
+          description: Latest id, or null when there are no posts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: string, nullable: true }
+
+  /v1/posts/oldest_at:
+    get:
+      operationId: getOldestPostAt
+      x-tier: min
+      summary: Time of the oldest post
+      responses:
+        "200":
+          description: Oldest `created_at`, or null when there are no posts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created_at]
+                properties:
+                  created_at: { type: string, format: date-time, nullable: true }
+
+  /v1/posts/search:
+    get:
+      operationId: searchPosts
+      x-tier: min
+      summary: Past-log search, newest first
+      description: |
+        Deleted posts are left out. At least one of `q`, `tags`,
+        `exclude_tags`, `author`, `since`, `until` is required (400
+        otherwise). `q` is split on whitespace (ASCII and U+3000); at most 5
+        distinct terms of at most 100 characters each are used. Terms match
+        as case-insensitive substrings of the text (case folding is only
+        required for ASCII).
+      parameters:
+        - $ref: "#/components/parameters/Q"
+        - $ref: "#/components/parameters/QOp"
+        - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Until"
+        - $ref: "#/components/parameters/Tags"
+        - $ref: "#/components/parameters/TagsOp"
+        - $ref: "#/components/parameters/ExcludeTags"
+        - $ref: "#/components/parameters/ExcludeOp"
+        - $ref: "#/components/parameters/Author"
+        - $ref: "#/components/parameters/Page"
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - $ref: "#/components/parameters/XClientId"
+      responses:
+        "200":
+          description: Posts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Post" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/posts/search/count:
+    get:
+      operationId: countSearchPosts
+      x-tier: min
+      summary: Number of posts `GET /v1/posts/search` would return across all pages
+      parameters:
+        - $ref: "#/components/parameters/Q"
+        - $ref: "#/components/parameters/QOp"
+        - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Until"
+        - $ref: "#/components/parameters/Tags"
+        - $ref: "#/components/parameters/TagsOp"
+        - $ref: "#/components/parameters/ExcludeTags"
+        - $ref: "#/components/parameters/ExcludeOp"
+        - $ref: "#/components/parameters/Author"
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema: { type: integer }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/posts/by-ids:
+    get:
+      operationId: getPostsByIds
+      x-tier: min
+      summary: Bulk lookup by id, in unspecified order; unknown ids are skipped
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          description: At most 100.
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+        - $ref: "#/components/parameters/XClientId"
+      responses:
+        "200":
+          description: Posts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Post" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/posts/{id}:
+    get:
+      operationId: getPost
+      x-tier: min
+      summary: One post
+      parameters:
+        - $ref: "#/components/parameters/PostId"
+        - $ref: "#/components/parameters/XClientId"
+      responses:
+        "200":
+          description: The post
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Post" }
+        "404": { $ref: "#/components/responses/PostNotFound" }
+    delete:
+      operationId: deletePost
+      x-tier: min
+      summary: Delete one of your own posts
+      description: |
+        Soft delete: the post stays (status `deleted`). Allowed only when
+        `X-Client-Id` equals the `client_id` the post was created with and
+        the post is still active; otherwise 403 (`forbidden`).
+      parameters:
+        - $ref: "#/components/parameters/PostId"
+        - $ref: "#/components/parameters/XClientId"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, status]
+                properties:
+                  ok: { type: boolean, enum: [true] }
+                  status: { type: string, enum: [deleted] }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/PostNotFound" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+
+  /v1/tags:
+    get:
+      operationId: listTags
+      x-tier: min
+      summary: Tags
+      description: |
+        A tag exists once a post has used it (or, with `tag_create`, once it
+        was registered). `count` / `last_posted_at` (with `with_counts`)
+        cover every post carrying the tag, deleted ones included, as
+        `GET /v1/posts/count?tags=<name>` does.
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive substring of the tag name (ASCII folding only)
+          schema: { type: string }
+        - name: names
+          in: query
+          description: Only these tags. At most 200.
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+        - name: with_counts
+          in: query
+          description: Fill `count` and `last_posted_at` (null otherwise)
+          schema: { type: boolean, default: false }
+        - name: sort
+          in: query
+          description: "recent: newest tag first; count: most posts first; name: by name. Ties break by name."
+          schema: { type: string, enum: [recent, count, name], default: recent }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Tag" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/Invalid" }
+    post:
+      operationId: createTag
+      x-tier: full
+      x-feature: tag_create
+      summary: Register a tag before any post uses it (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        "200":
+          description: The tag (existing or new)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tag" }
+        "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+
+  /v1/presence:
+    post:
+      operationId: postPresence
+      x-tier: min
+      x-feature: presence
+      summary: Presence heartbeat ("I am here"); counts toward `active_count`
+      description: |
+        A UI sends it when a page opens and then about once a minute while
+        it stays open. The body is an empty JSON object (or no body);
+        servers ignore unknown fields. The server keeps only what it needs
+        to count distinct participants for a short time (at most an hour),
+        and never raw addresses. Not an analytics endpoint (prose §8.2).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, enum: [true] }
+        "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+
+  /v1/active_count:
+    get:
+      operationId: getActiveCount
+      x-tier: min
+      x-feature: active_count
+      summary: Number of distinct participants seen by presence in the last N minutes
+      parameters:
+        - name: minutes
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 60, default: 5 }
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count: { type: integer, minimum: 0 }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /v1/links/by-urls:
+    get:
+      operationId: getLinksByUrls
+      x-tier: full
+      x-feature: link_preview
+      summary: Cached link previews for URLs
+      description: |
+        Previews the server has fetched for these URLs; URLs it knows nothing
+        about are left out.
+      parameters:
+        - name: urls
+          in: query
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: Previews
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/UrlSummary" }
+
+components:
+  parameters:
+    PostId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    XClientId:
+      name: X-Client-Id
+      in: header
+      description: The browser's own client id. When sent, each post carries `mine`.
+      schema: { type: string }
+    Tags:
+      name: tags
+      in: query
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    TagsOp:
+      name: tags_op
+      in: query
+      description: "or: posts carrying any of `tags`; and: every one of them"
+      schema: { type: string, enum: [and, or], default: or }
+    ExcludeTags:
+      name: exclude_tags
+      in: query
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    ExcludeOp:
+      name: exclude_op
+      in: query
+      description: "or: drop posts carrying any of `exclude_tags`; and: every one of them"
+      schema: { type: string, enum: [and, or], default: or }
+    Author:
+      name: author
+      in: query
+      description: Only posts whose `author` is exactly this (after trimming). Posts without an author never match.
+      schema: { type: string }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    RootsOnly:
+      name: roots_only
+      in: query
+      schema: { type: boolean, default: false }
+    IncludeTree:
+      name: include_tree
+      in: query
+      schema: { type: boolean, default: false }
+    Q:
+      name: q
+      in: query
+      description: Whitespace-separated terms
+      schema: { type: string }
+    QOp:
+      name: q_op
+      in: query
+      description: "and: a post must contain every term; or: any term"
+      schema: { type: string, enum: [and, or], default: and }
+    Since:
+      name: since
+      in: query
+      description: Inclusive lower bound on `created_at`. ISO 8601; without an offset, the server's timezone; a bare date is its midnight.
+      schema: { type: string }
+    Until:
+      name: until
+      in: query
+      description: Exclusive upper bound on `created_at`. Same format as `since`.
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: "`bad_request`: well-formed request the server will not run"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Invalid:
+      description: "`invalid`: malformed request"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: "`forbidden`: not allowed"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PostNotFound:
+      description: "`post_not_found`: no such post"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: "`too_large`: request body too large"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: "`rate_limited`: posting too fast"
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Maintenance:
+      description: '`maintenance`: writes are off, `{"detail": "maintenance", "code": "maintenance"}`'
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [detail, code]
+      properties:
+        detail: { type: string, description: For people (English) }
+        code:
+          type: string
+          description: |
+            Stable and machine-readable (prose §5.6): `bad_request`,
+            `forbidden`, `not_found`, `post_not_found`, `method_not_allowed`,
+            `too_large`, `invalid`, `rate_limited`, `maintenance`,
+            `internal`, `unavailable`. Clients treat unknown codes by status.
+
+    Discovery:
+      type: object
+      required: [protocol, apis]
+      properties:
+        protocol: { type: string, enum: [kssw] }
+        apis:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [version, base]
+            properties:
+              version: { type: string, description: 'Protocol major version, e.g. "1"' }
+              base:
+                type: string
+                description: |
+                  The API base: an absolute URL, or a path-absolute reference
+                  (`/bbs/api`) resolved against the discovery document's URL.
+                  A trailing `/` is not significant.
+              name: { type: string, description: Optional human-readable name of the board }
+      example:
+        protocol: kssw
+        apis:
+          - { version: "1", base: "/bbs/api" }
+
+    Meta:
+      type: object
+      required: [protocol, version, profile, impl, impl_version, features]
+      properties:
+        protocol: { type: string, enum: [kssw] }
+        version: { type: string, description: 'Protocol major version: "1" for this document' }
+        profile: { type: string, enum: [min, full], description: Highest conformance class implemented }
+        impl: { type: string, description: "Implementation name, e.g. php" }
+        impl_version: { type: string, description: "The implementation's release version (SemVer), e.g. 0.2.0-alpha.1" }
+        features:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+          description: |
+            Features (optional operations, `x-feature`) this server
+            implements. Names a client does not know are ignored.
+      example:
+        protocol: kssw
+        version: "1"
+        profile: min
+        impl: php
+        impl_version: "0.2.0-alpha.1"
+        features: [active_count, admin, presence]
+
+    Post:
+      type: object
+      required: [id, text, created_at, tags, parent_id, root_id, status, author]
+      properties:
+        id: { type: string, format: uuid }
+        text:
+          type: string
+          description: Leading/trailing whitespace trimmed. Empty for deleted posts.
+        created_at: { type: string, format: date-time }
+        tags:
+          type: array
+          items: { type: string }
+          description: Tag names, sorted by code point. Empty for deleted posts.
+        parent_id: { type: string, format: uuid, nullable: true }
+        root_id: { type: string, format: uuid, description: Own id for a root post }
+        status: { type: string, enum: [active, deleted] }
+        author: { type: string, nullable: true }
+        mine:
+          type: boolean
+          nullable: true
+          description: Whether the caller wrote the post. Null unless the caller identified itself with `X-Client-Id`.
+
+    PostCreate:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 5000
+          description: Not empty or whitespace only. At most 5,000 characters (code points).
+        tags:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 64 }
+          description: Tag names. Trimmed; empty strings and duplicates dropped.
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Must name an existing post (422 otherwise).
+        author:
+          type: string
+          nullable: true
+          maxLength: 40
+          description: Trimmed; empty means none.
+        client_id:
+          type: string
+          nullable: true
+          maxLength: 128
+          description: The browser's own random id. Needed to delete the post later.
+      additionalProperties: true
+
+    Tag:
+      type: object
+      required: [name, created_at, count, last_posted_at]
+      properties:
+        name: { type: string, description: The tag itself (its text) }
+        created_at: { type: string, format: date-time, description: First use }
+        count: { type: integer, nullable: true }
+        last_posted_at: { type: string, format: date-time, nullable: true }
+
+    UrlSummary:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
+        title: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        site_name: { type: string, nullable: true }
+        image_url: { type: string, nullable: true }
+        fetched_at: { type: string, format: date-time, nullable: true }
+        first_post_id: { type: string, nullable: true, description: The first post that linked the URL }

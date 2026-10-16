@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      impl_ref:
+        description: ks-sw-api ref to test against
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+env:
+  # The PHP reference implementation. Public-ready URL: this job works only
+  # once the repository is public (a private repository would need a token).
+  IMPL_REPOSITORY: kimari-s/ks-sw-api
+  IMPL_REF: ${{ github.event.inputs.impl_ref || 'main' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate OpenAPI
+        run: |
+          pip install --quiet openapi-spec-validator
+          openapi-spec-validator openapi/kssw.openapi.yaml openapi/kssw-admin.openapi.yaml
+      - name: Markdown links
+        run: python3 scripts/check-links.py
+      - name: Conformance suite compiles
+        run: python3 -m compileall -q conformance
+
+  reference:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.IMPL_REPOSITORY }}
+          ref: ${{ env.IMPL_REF }}
+          path: .scratch/impl
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Conformance against the reference implementation (php:7.4 and php:8.3)
+        run: |
+          pip install --quiet pytest
+          for img in php:7.4-cli php:8.3-cli; do
+            echo "== $img"
+            PHP_IMAGE=$img PYTEST="python -m pytest -q" scripts/run-reference.sh .scratch/impl
+          done
