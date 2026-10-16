@@ -4,6 +4,11 @@ Protocol versions and releases of this repository. The protocol version
 (`/v1/meta` `version`) and the repository release version are separate:
 the protocol is `1`; releases of this repository follow SemVer.
 
+## Unreleased
+
+- §5.7: the suggested post rate-limit window is a few seconds (e.g. 5),
+  was 30 seconds. Still the operator's choice (SHOULD, non-normative).
+
 ## 0.1.0-alpha.1 — protocol 1, Draft
 
 First public draft of kssw protocol version 1, taken from the contract of

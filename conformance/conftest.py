@@ -12,7 +12,8 @@ when it is not there.
 The server under test must:
 - trust X-Forwarded-For (every request here sends a random one, so the per-IP
   post cooldown does not get in the way; tests that need one IP pick it);
-- have the post cooldown on (any value > ~10 s; the default 30 s is fine).
+- have the post cooldown on (a few seconds or more; ks-sw-api's default 5 s
+  is fine): the rate-limit tests post twice in a row and expect a 429.
 
 Tests only look at data they created (unique tags per run), so the server
 may already hold posts. They do write to it: never point this at production.

@@ -232,7 +232,8 @@ The admin API adds its own codes (§9.3).
   `client_id` and, independently, per client network address (a client
   can change its id at will). Over the limit it SHOULD answer `429`
   (`rate_limited`) with a `Retry-After` header [RFC 9110] in seconds. The
-  window is the operator's choice (30 seconds is a sensible default).
+  window is the operator's choice (a few seconds, e.g. 5, is a sensible
+  default).
 - A server MAY rate-limit any other operation the same way.
 - A server SHOULD bound request bodies (64 KiB is ample) and answer
   `413` (`too_large`) beyond that.
